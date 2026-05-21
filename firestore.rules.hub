@@ -1,0 +1,72 @@
+// firestore.rules  — deploy to the SHARED HUB project ONLY
+// firebase deploy --only firestore:rules --project bms-hub
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper functions ────────────────────────────────────────────────────
+
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    // Fetch this bank's hub user record (contains bankId)
+    function hubUser() {
+      return get(/databases/$(database)/documents/hub_users/$(request.auth.uid)).data;
+    }
+
+    function myBankId() {
+      return hubUser().bankId;
+    }
+
+    // ── hub_users — bank identity registry in the hub ────────────────────────
+    // Each bank has one user in hub Auth; their bankId is stored here.
+    match /hub_users/{uid} {
+      allow read: if isAuth() && request.auth.uid == uid;
+      // Written once during setup by an admin; not writable by clients
+      allow write: if false;
+    }
+
+    // ── banks — IFSC registry, read by all, write by none ───────────────────
+    match /banks/{bankId} {
+      allow read: if isAuth();
+      allow write: if false; // Managed via Firebase Console / admin script
+    }
+
+    // ── public_accounts — routing directory (no PII, no balance) ────────────
+    match /public_accounts/{accountId} {
+      allow read: if isAuth();
+      // Banks register their own public accounts
+      allow create: if isAuth() && request.resource.data.bankId == myBankId();
+      allow update: if isAuth() && resource.data.bankId == myBankId();
+      allow delete: if false;
+    }
+
+    // ── interbank_transfers — the message bus ────────────────────────────────
+    match /interbank_transfers/{transferId} {
+      // Any authenticated bank can read transfers
+      allow read: if isAuth();
+
+      // Only the originating bank can CREATE a transfer
+      allow create: if isAuth()
+        && request.resource.data.fromBankId == myBankId()
+        && request.resource.data.status == 'pending'
+        // Hub never stores balances or PII
+        && !('balance' in request.resource.data)
+        && !('customerName' in request.resource.data)
+        && !('aadhaar' in request.resource.data);
+
+      // Only the RECEIVING bank can UPDATE status (to completed/failed)
+      allow update: if isAuth()
+        && resource.data.toBankId == myBankId()
+        // Can only change status + completedAt + failureReason
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['status', 'completedAt', 'failureReason'])
+        && request.resource.data.status in ['completed', 'failed'];
+
+      // No deletes — permanent audit trail
+      allow delete: if false;
+    }
+  }
+}

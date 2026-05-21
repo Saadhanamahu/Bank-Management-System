@@ -1,0 +1,94 @@
+// firestore.rules  — deploy to EACH PRIVATE bank project
+// firebase deploy --only firestore:rules --project bms-bank-a
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper functions ────────────────────────────────────────────────────
+
+    // Confirm user is authenticated
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    // Fetch the calling user's staff record
+    function staffData() {
+      return get(/databases/$(database)/documents/staff/$(request.auth.uid)).data;
+    }
+
+    // Role checks
+    function isTeller()  { return isAuth() && staffData().role in ['teller', 'manager', 'admin']; }
+    function isManager() { return isAuth() && staffData().role in ['manager', 'admin']; }
+    function isAdmin()   { return isAuth() && staffData().role == 'admin'; }
+
+    // ── Staff collection ────────────────────────────────────────────────────
+    match /staff/{uid} {
+      allow read: if isAuth() && (request.auth.uid == uid || isManager());
+      allow create, update: if isAdmin();
+      allow delete: if false; // Never delete staff records
+    }
+
+    // ── Customers ───────────────────────────────────────────────────────────
+    match /customers/{customerId} {
+      allow read: if isTeller();
+      allow create: if isManager();
+      allow update: if isManager();
+      allow delete: if false;
+    }
+
+    // ── Accounts ────────────────────────────────────────────────────────────
+    match /accounts/{accountId} {
+      allow read: if isTeller();
+      allow create: if isManager();
+      // Balance can only be updated (not directly set to arbitrary value).
+      // Full atomic protection happens via runTransaction() in the app.
+      // In production, move balance mutations to Cloud Functions.
+      allow update: if isTeller() && (
+        // Allow status changes by managers
+        (isManager() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']))
+        ||
+        // Allow balance+updatedAt changes (from runTransaction)
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['balance', 'updatedAt'])
+      );
+      allow delete: if false;
+    }
+
+    // ── Transactions ────────────────────────────────────────────────────────
+    match /transactions/{txnId} {
+      allow read: if isTeller();
+      allow create: if isTeller(); // Written by runTransaction in app
+      allow update: if isTeller() && (
+        // Only allow status/completedAt/failureReason updates
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'completedAt', 'failureReason'])
+      );
+      allow delete: if false; // Immutable audit trail
+    }
+
+    // ── KYC ─────────────────────────────────────────────────────────────────
+    match /kyc/{kycId} {
+      allow read: if isManager();
+      allow create: if isTeller();
+      allow update: if isManager();
+      allow delete: if false;
+    }
+
+    // ── Audit logs ───────────────────────────────────────────────────────────
+    match /audit_logs/{logId} {
+      allow read: if isManager();
+      allow create: if isTeller();
+      allow update, delete: if false; // Immutable
+    }
+
+    // ── Notifications ────────────────────────────────────────────────────────
+    match /notifications/{notifId} {
+      allow read: if isTeller();
+      allow create: if isTeller();
+      allow update: if isTeller() && (
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead'])
+      );
+      allow delete: if false;
+    }
+  }
+}
