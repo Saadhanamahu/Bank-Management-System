@@ -8,7 +8,8 @@
     "dev:banka": "cp .env.bank-a .env.local && vite --port 5173",
     "dev:bankb": "cp .env.bank-b .env.local && vite --port 5174",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "deploy": "gh-pages -d dist"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.6.0",
